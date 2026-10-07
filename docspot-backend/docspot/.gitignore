@@ -1,0 +1,27 @@
+# Compiled class files & build directories
+target/
+build/
+out/
+*.jar
+*.war
+*.ear
+
+# Logs
+logs/
+*.log
+
+# IDE files
+.idea/
+uploads/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets & Local Configurations
+.env
