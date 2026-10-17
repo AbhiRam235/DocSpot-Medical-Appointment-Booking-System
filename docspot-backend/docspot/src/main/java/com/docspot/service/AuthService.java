@@ -55,6 +55,7 @@ public class AuthService {
     private final JwtUtil                jwtUtil;
     private final EmailService              emailService;
     private final ApplicationEventPublisher eventPublisher;
+    private final OtpService otpService;
 
     @Value("${app.jwt.refresh-token-expiration}")
     private long refreshTokenExpiration; // 7 days in ms
@@ -246,80 +247,39 @@ public class AuthService {
 
     // ─── 6. Forgot Password ───────────────────────────────────────────────────
 
-    /**
-     * Flow:
-     *  → Check if account exists (always return success message to prevent email enumeration)
-     *  → Invalidate any previous unused OTPs for this user
-     *  → Generate 6-digit OTP, store with 10-min expiry
-     *  → Send OTP to email asynchronously
-     */
     @Transactional
     public String forgotPassword(ForgotPasswordRequest req) {
-        userRepository.findByEmailAndDeletedFalse(req.getEmail()).ifPresent(user -> {
-            otpRepository.invalidateAllForUser(user.getId());
-
-            String otp = generateOtp();
-            LocalDateTime expiry = LocalDateTime.now().plusMinutes(10);
-
-            PasswordResetOtp resetOtp = PasswordResetOtp.builder()
-                    .user(user)
-                    .otp(otp)
-                    .expiryTime(expiry)
-                    .used(false)
-                    .build();
-            otpRepository.save(resetOtp);
-
-            emailService.sendOtpEmail(user.getEmail(), user.getName(), otp);
-            log.info("OTP sent to: {}", user.getEmail());
-        });
-
+        userRepository.findByEmailAndDeletedFalse(req.getEmail()).ifPresent(user ->
+                otpService.issue(user.getEmail()).ifPresent(otp -> {
+                    emailService.sendOtpEmail(user.getEmail(), user.getName(), otp);
+                    log.info("OTP sent to: {}", user.getEmail());
+                })
+        );
+        // Same response whether or not the account exists or the cooldown blocked it
         return "If an account exists with this email, an OTP has been sent.";
     }
 
+
     // ─── 7. Verify OTP ───────────────────────────────────────────────────────
 
-    /**
-     * Flow:
-     *  → Find the most recent unused OTP for this email
-     *  → Validate: matches, not expired
-     *  → Mark OTP as used
-     *  → Invalidate any leftover reset tokens from earlier attempts
-     *  → Issue a fresh, single-use, DB-tracked reset token (opaque UUID, not a JWT)
-     *  → Client sends this token in the reset-password request as proof of OTP verification
-     */
     @Transactional
     public String verifyOtp(VerifyOtpRequest req) {
-        User user = userRepository.findByEmailAndDeletedFalse(req.getEmail())
-                .orElseThrow(() -> new BadRequestException("No account found with this email."));
+        // One generic error for every failure: wrong OTP, expired, no account, too many attempts
+        User user = userRepository.findByEmailAndDeletedFalse(req.getEmail()).orElse(null);
 
-        PasswordResetOtp otpRecord = otpRepository
-                .findTopByUser_EmailAndUsedFalseOrderByCreatedAtDesc(req.getEmail())
-                .orElseThrow(() -> new BadRequestException("No active OTP found. Please request a new one."));
-
-        if (!otpRecord.getOtp().equals(req.getOtp())) {
-            throw new BadRequestException("Incorrect OTP. Please try again.");
-        }
-        if (otpRecord.getExpiryTime().isBefore(LocalDateTime.now())) {
-            otpRecord.setUsed(true);
-            otpRepository.save(otpRecord);
-            throw new BadRequestException("OTP has expired. Please request a new one.");
+        if (user == null || !otpService.verify(user.getEmail(), req.getOtp())) {
+            throw new BadRequestException("Invalid or expired OTP.");
         }
 
-        otpRecord.setUsed(true);
-        otpRepository.save(otpRecord);
-
-        // Invalidate any leftover unused reset tokens from earlier verify-otp attempts
         resetTokenRepository.invalidateAllForUser(user.getId());
 
-        // Issue a fresh, single-use, DB-tracked reset token
         String tokenValue = UUID.randomUUID().toString();
-        PasswordResetToken resetToken = PasswordResetToken.builder()
+        resetTokenRepository.save(PasswordResetToken.builder()
                 .user(user)
                 .token(tokenValue)
                 .expiryDate(LocalDateTime.now().plusMinutes(15))
                 .used(false)
-                .build();
-        resetTokenRepository.save(resetToken);
+                .build());
 
         log.info("OTP verified, reset token issued for: {}", user.getEmail());
         return tokenValue;

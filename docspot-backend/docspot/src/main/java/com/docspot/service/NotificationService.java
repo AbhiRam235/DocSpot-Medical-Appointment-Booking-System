@@ -168,6 +168,7 @@ public class NotificationService {
         if (!persisted) {
             log.warn("[Event] In-app notification persistence failed for cancellation id={} — emails still proceed.",
                     event.getAppointmentId());
+            return;
         }
 
         String date = event.getAppointmentDate().toString();
