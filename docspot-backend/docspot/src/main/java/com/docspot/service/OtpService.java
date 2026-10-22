@@ -24,10 +24,13 @@ public class OtpService {
 
     @Value("${otp.ttl-minutes:10}")
     private long ttlMinutes;
+
     @Value("${otp.max-attempts:5}")
     private int maxAttempts;
+
     @Value("${otp.resend-cooldown-seconds:60}")
     private long cooldownSeconds;
+
     @Value("${otp.hmac-secret}")
     private String hmacSecret;
 
@@ -40,23 +43,24 @@ public class OtpService {
     }
 
     /**
-     * Creates a new OTP. Returns empty if the user requested one too recently.
-     * Any previous OTP is overwritten, so only the latest one is ever valid.
+     * Issues a new OTP. Uses atomic SETNX for rate-limiting/cooldown.
+     * Overwrites any previous OTP so only the latest remains valid.
      */
     public Optional<String> issue(String rawEmail) {
         String email = normalize(rawEmail);
 
-        // Resend cooldown (atomic: only one caller wins)
+        // Atomic rate-limit check: Only one caller can acquire the cooldown slot
         Boolean allowed = redis.opsForValue()
                 .setIfAbsent(cooldownKey(email), "1", Duration.ofSeconds(cooldownSeconds));
+
         if (!Boolean.TRUE.equals(allowed)) {
-            return Optional.empty();
+            return Optional.empty(); // Too soon to resend
         }
 
         String otp = String.format("%06d", RANDOM.nextInt(1_000_000));
         Duration ttl = Duration.ofMinutes(ttlMinutes);
 
-        // Store only a keyed hash, never the plain OTP
+        // Store keyed HMAC hash (never plain text) and initialize attempt counter
         redis.opsForValue().set(otpKey(email), hash(email, otp), ttl);
         redis.opsForValue().set(attemptsKey(email), "0", ttl);
 
@@ -64,26 +68,25 @@ public class OtpService {
     }
 
     /**
-     * Returns true only once per OTP. Wrong guesses are counted;
-     * after maxAttempts the OTP is destroyed.
+     * Verifies the submitted OTP. Counts attempts atomically.
+     * Invalidates and blocks further attempts if max attempts are exceeded.
      */
     public boolean verify(String rawEmail, String submittedOtp) {
         String email = normalize(rawEmail);
 
         String storedHash = redis.opsForValue().get(otpKey(email));
         if (storedHash == null) {
-            return false; // expired or never issued
+            return false; // Expired or never issued
         }
 
-        // Count the attempt BEFORE comparing (atomic INCR)
+        // Increment attempts atomically BEFORE comparing
         Long attempts = redis.opsForValue().increment(attemptsKey(email));
         if (attempts != null && attempts > maxAttempts) {
-            redis.delete(otpKey(email));
-            redis.delete(attemptsKey(email));
+            cleanup(email);
             return false;
         }
 
-        // Constant-time comparison (no timing side channel)
+        // Constant-time comparison to prevent timing side-channel attacks
         boolean matches = MessageDigest.isEqual(
                 storedHash.getBytes(StandardCharsets.UTF_8),
                 hash(email, submittedOtp).getBytes(StandardCharsets.UTF_8));
@@ -92,11 +95,14 @@ public class OtpService {
             return false;
         }
 
-        // DEL returns true for exactly one caller, so two concurrent
-        // requests with the correct OTP can't both succeed
-        Boolean consumed = redis.delete(otpKey(email));
+        // Successful verification: consume/delete the OTP so it cannot be reused
+        cleanup(email);
+        return true;
+    }
+
+    private void cleanup(String email) {
+        redis.delete(otpKey(email));
         redis.delete(attemptsKey(email));
-        return Boolean.TRUE.equals(consumed);
     }
 
     private String hash(String email, String otp) {
