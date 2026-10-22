@@ -6,6 +6,7 @@ import com.docspot.entity.*;
 import com.docspot.enums.DoctorStatus;
 import com.docspot.enums.Role;
 import com.docspot.event.DoctorRegisteredEvent;
+import com.docspot.event.PasswordResetRequestedEvent;
 import com.docspot.exception.BadRequestException;
 import com.docspot.repository.*;
 import com.docspot.security.JwtUtil;
@@ -246,30 +247,50 @@ public class AuthService {
 
     // ─── 6. Forgot Password ───────────────────────────────────────────────────
 
-    @Transactional
-    public String forgotPassword(ForgotPasswordRequest req) {
+    public String forgotPassword(ForgotPasswordRequest req, String clientIp) {
+        // 1. IP-based rate limit guard
+        if (!otpService.allowIpRequest(clientIp)) {
+            // Return identical generic response to prevent IP enumeration/spam blocking disclosure
+            return "If an account exists with this email, an OTP has eeen sent.";
+        }
+
         userRepository.findByEmailAndDeletedFalse(req.getEmail()).ifPresent(user ->
                 otpService.issue(user.getEmail()).ifPresent(otp -> {
-                    emailService.sendOtpEmail(user.getEmail(), user.getName(), otp);
-                    log.info("OTP sent to: {}", user.getEmail());
+                    eventPublisher.publishEvent(new PasswordResetRequestedEvent(user.getEmail(), user.getName(), otp));
+                    log.info("OTP requested for: {}", user.getEmail());
                 })
         );
-        // Same response whether or not the account exists or the cooldown blocked it
+
         return "If an account exists with this email, an OTP has been sent.";
     }
 
 
     // ─── 7. Verify OTP ───────────────────────────────────────────────────────
 
-    @Transactional
-    public String verifyOtp(VerifyOtpRequest req) {
-        // One generic error for every failure: wrong OTP, expired, no account, too many attempts
-        User user = userRepository.findByEmailAndDeletedFalse(req.getEmail()).orElse(null);
+    /**
+     * Verifies OTP with IP-level rate limiting, decoupled transaction bounds, and secure token issuance.
+     */
+    public String verifyOtp(VerifyOtpRequest req, String clientIp) {
+        // 1. Check IP-based brute-force protection for verification attempts
+        if (!otpService.allowVerificationAttempt(clientIp)) {
+            throw new BadRequestException("Too many verification attempts. Please try again later.");
+        }
 
-        if (user == null || !otpService.verify(user.getEmail(), req.getOtp())) {
+        // 2. Fast-fail check on user existence
+        User user = userRepository.findByEmailAndDeletedFalse(req.getEmail())
+                .orElseThrow(() -> new BadRequestException("Invalid or expired OTP."));
+
+        // 3. Perform Redis verification outside the DB transaction
+        if (!otpService.verify(user.getEmail(), req.getOtp())) {
             throw new BadRequestException("Invalid or expired OTP.");
         }
 
+        // 4. Execute DB token generation inside transactional scope
+        return executePasswordResetTokenTransaction(user);
+    }
+
+    @Transactional
+    protected String executePasswordResetTokenTransaction(User user) {
         resetTokenRepository.invalidateAllForUser(user.getId());
 
         String tokenValue = UUID.randomUUID().toString();

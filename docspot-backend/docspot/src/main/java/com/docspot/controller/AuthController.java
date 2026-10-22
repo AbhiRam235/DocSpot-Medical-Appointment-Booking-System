@@ -8,6 +8,7 @@ import com.docspot.security.CookieUtil;
 import com.docspot.service.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -164,37 +165,43 @@ public class AuthController {
     @Operation(
             summary     = "Forgot password — send OTP",
             description = """
-            Sends a 6-digit OTP to the provided email if an account exists.
-            Always returns a success response (prevents email enumeration).
-            OTP is valid for 10 minutes.
-            """
+        Sends a 6-digit OTP to the provided email if an account exists.
+        Always returns a success response (prevents email enumeration).
+        OTP is valid for 10 minutes.
+        """
     )
     public ResponseEntity<ApiResponse<String>> forgotPassword(
-            @Valid @RequestBody ForgotPasswordRequest request) {
+            @Valid @RequestBody ForgotPasswordRequest request,
+            HttpServletRequest httpRequest) {
 
-        String message = authService.forgotPassword(request);
+        String clientIp = getClientIp(httpRequest);
+        String message = authService.forgotPassword(request, clientIp);
         return ResponseEntity.ok(ApiResponse.success(message));
     }
+
 
     // ─── POST /api/auth/verify-otp ───────────────────────────────────────────
 
     @PostMapping("/verify-otp")
     @Operation(
             summary     = "Verify OTP",
-            description = """
-            Validates the OTP sent to the user's email.
-            On success, returns a short-lived password reset token (opaque
-            UUID, 15 min). This reset token is required in the
-            /reset-password request.
-            """
+            description = "Verifies the submitted 6-digit OTP and returns a password reset token if valid."
     )
     public ResponseEntity<ApiResponse<String>> verifyOtp(
-            @Valid @RequestBody VerifyOtpRequest request) {
+            @Valid @RequestBody VerifyOtpRequest request,
+            HttpServletRequest httpRequest) {
 
-        String resetToken = authService.verifyOtp(request);
-        return ResponseEntity.ok(
-                ApiResponse.success("OTP verified. Use the reset token to set a new password.", resetToken)
-        );
+        String clientIp = getClientIp(httpRequest);
+        String resetToken = authService.verifyOtp(request, clientIp);
+        return ResponseEntity.ok(ApiResponse.success(resetToken));
+    }
+
+    private String getClientIp(HttpServletRequest request) {
+        String xfHeader = request.getHeader("X-Forwarded-For");
+        if (xfHeader == null || xfHeader.isBlank()) {
+            return request.getRemoteAddr();
+        }
+        return xfHeader.split(",")[0].trim();
     }
 
     // ─── POST /api/auth/reset-password ───────────────────────────────────────

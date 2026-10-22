@@ -12,6 +12,7 @@ import com.docspot.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Async;
@@ -67,6 +68,13 @@ public class NotificationService {
 
     @Value("${app.admin.email}")
     private String adminEmail;
+
+
+    @Async
+    @EventListener
+    public void handlePasswordReset(PasswordResetRequestedEvent event) {
+        emailService.sendOtpEmail(event.email(), event.name(), event.otp());
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     //  TRIGGER 1 — Doctor registers

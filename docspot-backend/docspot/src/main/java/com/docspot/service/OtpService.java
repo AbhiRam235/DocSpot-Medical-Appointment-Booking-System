@@ -34,33 +34,68 @@ public class OtpService {
     @Value("${otp.hmac-secret}")
     private String hmacSecret;
 
-    private String otpKey(String email)      { return "otp:reset:" + email; }
-    private String attemptsKey(String email) { return "otp:attempts:" + email; }
-    private String cooldownKey(String email) { return "otp:cooldown:" + email; }
+    private String otpKey(String email)          { return "otp:reset:" + email; }
+    private String attemptsKey(String email)     { return "otp:attempts:" + email; }
+    private String cooldownKey(String email)     { return "otp:cooldown:" + email; }
+    private String ipRateLimitKey(String ip)     { return "ratelimit:ip:" + ip; }
+    private String verifyIpRateLimitKey(String ip) { return "ratelimit:verify:ip:" + ip; }
 
     private String normalize(String email) {
         return email.trim().toLowerCase();
     }
 
     /**
-     * Issues a new OTP. Uses atomic SETNX for rate-limiting/cooldown.
-     * Overwrites any previous OTP so only the latest remains valid.
+     * Checks and increments IP-based rate limit for requesting OTPs. Max 10 per minute.
+     */
+    public boolean allowIpRequest(String clientIp) {
+        if (clientIp == null || clientIp.isBlank()) {
+            return true;
+        }
+        String key = ipRateLimitKey(clientIp);
+        Long count = redis.opsForValue().increment(key);
+        if (count != null && count == 1) {
+            redis.expire(key, Duration.ofMinutes(1));
+        } else if (count != null && count > 10) {
+            redis.expire(key, Duration.ofMinutes(15)); // Extend lockout on abuse
+            return false;
+        }
+        return count == null || count <= 10;
+    }
+
+    /**
+     * Checks and increments IP-based rate limit for verifying OTPs. Max 20 attempts per 5 mins.
+     */
+    public boolean allowVerificationAttempt(String clientIp) {
+        if (clientIp == null || clientIp.isBlank()) {
+            return true;
+        }
+        String key = verifyIpRateLimitKey(clientIp);
+        Long count = redis.opsForValue().increment(key);
+        if (count != null && count == 1) {
+            redis.expire(key, Duration.ofMinutes(5));
+        } else if (count != null && count > 20) {
+            redis.expire(key, Duration.ofMinutes(15)); // Extend lockout on brute force
+            return false;
+        }
+        return count == null || count <= 20;
+    }
+
+    /**
+     * Issues a new OTP. Uses atomic SETNX for email cooldown rate-limiting.
      */
     public Optional<String> issue(String rawEmail) {
         String email = normalize(rawEmail);
 
-        // Atomic rate-limit check: Only one caller can acquire the cooldown slot
         Boolean allowed = redis.opsForValue()
                 .setIfAbsent(cooldownKey(email), "1", Duration.ofSeconds(cooldownSeconds));
 
         if (!Boolean.TRUE.equals(allowed)) {
-            return Optional.empty(); // Too soon to resend
+            return Optional.empty();
         }
 
         String otp = String.format("%06d", RANDOM.nextInt(1_000_000));
         Duration ttl = Duration.ofMinutes(ttlMinutes);
 
-        // Store keyed HMAC hash (never plain text) and initialize attempt counter
         redis.opsForValue().set(otpKey(email), hash(email, otp), ttl);
         redis.opsForValue().set(attemptsKey(email), "0", ttl);
 
@@ -69,24 +104,21 @@ public class OtpService {
 
     /**
      * Verifies the submitted OTP. Counts attempts atomically.
-     * Invalidates and blocks further attempts if max attempts are exceeded.
      */
     public boolean verify(String rawEmail, String submittedOtp) {
         String email = normalize(rawEmail);
 
         String storedHash = redis.opsForValue().get(otpKey(email));
         if (storedHash == null) {
-            return false; // Expired or never issued
+            return false;
         }
 
-        // Increment attempts atomically BEFORE comparing
         Long attempts = redis.opsForValue().increment(attemptsKey(email));
         if (attempts != null && attempts > maxAttempts) {
             cleanup(email);
             return false;
         }
 
-        // Constant-time comparison to prevent timing side-channel attacks
         boolean matches = MessageDigest.isEqual(
                 storedHash.getBytes(StandardCharsets.UTF_8),
                 hash(email, submittedOtp).getBytes(StandardCharsets.UTF_8));
@@ -95,7 +127,6 @@ public class OtpService {
             return false;
         }
 
-        // Successful verification: consume/delete the OTP so it cannot be reused
         cleanup(email);
         return true;
     }
