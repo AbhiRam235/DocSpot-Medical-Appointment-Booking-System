@@ -46,7 +46,6 @@ public class AuthService {
     private final DoctorRepository            doctorRepository;
     private final PatientRepository           patientRepository;
     private final RefreshTokenRepository      refreshTokenRepository;
-    private final PasswordResetOtpRepository  otpRepository;
     private final PasswordResetTokenRepository resetTokenRepository;
 
     private final PasswordEncoder        passwordEncoder;

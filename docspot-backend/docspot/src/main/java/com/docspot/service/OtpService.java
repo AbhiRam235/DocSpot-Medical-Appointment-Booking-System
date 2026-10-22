@@ -22,7 +22,7 @@ public class OtpService {
 
     private final StringRedisTemplate redis;
 
-    @Value("${otp.ttl-minutes:10}")
+    @Value("${otp.ttl-minutes:1}")
     private long ttlMinutes;
 
     @Value("${otp.max-attempts:5}")
