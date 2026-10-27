@@ -1,27 +1,33 @@
-# Compiled class files & build directories
+# Build output
 target/
 build/
 out/
 *.jar
 *.war
 *.ear
+!.mvn/wrapper/maven-wrapper.jar
 
 # Logs
 logs/
 *.log
 
-# IDE files
+# IDE
 .idea/
-uploads/
 *.iml
 .vscode/
 .classpath
 .project
 .settings/
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
 
-# Secrets & Local Configurations
+# Runtime data
+uploads/
+
+# Secrets & local config
 .env
+.env.*
+!.env.example
+src/main/resources/application.properties

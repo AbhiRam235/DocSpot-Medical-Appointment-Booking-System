@@ -1,0 +1,27 @@
+# Build output
+target/
+build/
+
+# Secrets & local config (must NOT end up in the image)
+.env
+.env.*
+src/main/resources/application.properties
+src/main/resources/application-local.properties
+
+# Runtime data
+uploads/
+
+# Git & IDE
+.git
+.gitignore
+.idea/
+*.iml
+.vscode/
+
+# Not needed in the image
+.mvn/
+mvnw
+mvnw.cmd
+Dockerfile
+docker-compose*.yml
+*.md

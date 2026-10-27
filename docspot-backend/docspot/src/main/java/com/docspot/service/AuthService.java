@@ -2,6 +2,7 @@ package com.docspot.service;
 
 import com.docspot.dto.request.*;
 import com.docspot.dto.response.AuthResponse;
+import com.docspot.dto.response.VerifyOtpResponse;
 import com.docspot.entity.*;
 import com.docspot.enums.DoctorStatus;
 import com.docspot.enums.Role;
@@ -21,6 +22,7 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
@@ -56,6 +58,7 @@ public class AuthService {
     private final EmailService              emailService;
     private final ApplicationEventPublisher eventPublisher;
     private final OtpService otpService;
+    private final TransactionTemplate transactionTemplate;
 
     @Value("${app.jwt.refresh-token-expiration}")
     private long refreshTokenExpiration; // 7 days in ms
@@ -270,7 +273,7 @@ public class AuthService {
     /**
      * Verifies OTP with IP-level rate limiting, decoupled transaction bounds, and secure token issuance.
      */
-    public String verifyOtp(VerifyOtpRequest req, String clientIp) {
+    public VerifyOtpResponse verifyOtp(VerifyOtpRequest req, String clientIp) {
         // 1. Check IP-based brute-force protection for verification attempts
         if (!otpService.allowVerificationAttempt(clientIp)) {
             throw new BadRequestException("Too many verification attempts. Please try again later.");
@@ -286,24 +289,24 @@ public class AuthService {
         }
 
         // 4. Execute DB token generation inside transactional scope
-        return executePasswordResetTokenTransaction(user);
-    }
+        String resetToken = transactionTemplate.execute(status -> {
+            resetTokenRepository.invalidateAllForUser(user.getId());
 
-    @Transactional
-    protected String executePasswordResetTokenTransaction(User user) {
-        resetTokenRepository.invalidateAllForUser(user.getId());
+            String tokenValue = UUID.randomUUID().toString();
+            resetTokenRepository.save(PasswordResetToken.builder()
+                    .user(user)
+                    .token(tokenValue)
+                    .expiryDate(LocalDateTime.now().plusMinutes(15))
+                    .used(false)
+                    .build());
 
-        String tokenValue = UUID.randomUUID().toString();
-        resetTokenRepository.save(PasswordResetToken.builder()
-                .user(user)
-                .token(tokenValue)
-                .expiryDate(LocalDateTime.now().plusMinutes(15))
-                .used(false)
-                .build());
+            return tokenValue;
+        });
 
         log.info("OTP verified, reset token issued for: {}", user.getEmail());
-        return tokenValue;
+        return new VerifyOtpResponse(resetToken);
     }
+
 
     // ─── 8. Reset Password ───────────────────────────────────────────────────
 

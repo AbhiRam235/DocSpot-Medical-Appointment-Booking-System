@@ -48,7 +48,7 @@ public class EmailService {
 
     private final JavaMailSender mailSender;
 
-    @Value("${spring.mail.username}")
+    @Value("${app.mail.from}")
     private String fromEmail;
 
     // ─── Auth (still directly/synchronously called — keeps @Async) ────────────

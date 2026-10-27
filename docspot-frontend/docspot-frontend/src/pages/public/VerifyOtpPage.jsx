@@ -26,8 +26,8 @@ export default function VerifyOtpPage() {
     try {
       // data is a resetToken string (a short-lived JWT) — carried forward
       // via router state only, never persisted to storage.
-      const resetToken = await authApi.verifyOtp({ email, otp });
-      navigate("/reset-password", { state: { resetToken } });
+      const result = await authApi.verifyOtp({ email, otp });
+      navigate("/reset-password", { state: { resetToken: result.resetToken } });
     } catch (err) {
       toast.error(err.response?.data?.message || "Invalid or expired code.");
     }

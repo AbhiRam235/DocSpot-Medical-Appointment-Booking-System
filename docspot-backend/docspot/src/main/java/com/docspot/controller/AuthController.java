@@ -3,6 +3,7 @@ package com.docspot.controller;
 import com.docspot.dto.request.*;
 import com.docspot.dto.response.ApiResponse;
 import com.docspot.dto.response.AuthResponse;
+import com.docspot.dto.response.VerifyOtpResponse;
 import com.docspot.exception.BadRequestException;
 import com.docspot.security.CookieUtil;
 import com.docspot.service.AuthService;
@@ -187,13 +188,11 @@ public class AuthController {
             summary     = "Verify OTP",
             description = "Verifies the submitted 6-digit OTP and returns a password reset token if valid."
     )
-    public ResponseEntity<ApiResponse<String>> verifyOtp(
+    public VerifyOtpResponse verifyOtp(
             @Valid @RequestBody VerifyOtpRequest request,
             HttpServletRequest httpRequest) {
 
-        String clientIp = getClientIp(httpRequest);
-        String resetToken = authService.verifyOtp(request, clientIp);
-        return ResponseEntity.ok(ApiResponse.success(resetToken));
+        return authService.verifyOtp(request, getClientIp(httpRequest));
     }
 
     private String getClientIp(HttpServletRequest request) {
