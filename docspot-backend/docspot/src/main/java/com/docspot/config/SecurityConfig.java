@@ -1,9 +1,11 @@
 package com.docspot.config;
 
+import com.docspot.security.CsrfCookieFilter;
 import com.docspot.security.CustomAccessDeniedHandler;
 import com.docspot.security.CustomAuthenticationEntryPoint;
 import com.docspot.security.JwtAuthFilter;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -14,13 +16,15 @@ import org.springframework.security.config.annotation.authentication.configurati
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -38,6 +42,10 @@ public class SecurityConfig {
     private final CustomAuthenticationEntryPoint authEntryPoint;
     private final CustomAccessDeniedHandler      accessDeniedHandler;
 
+    /** Same property CookieUtil uses. Set app.cookie.secure=false only for local http dev. */
+    @Value("${app.cookie.secure:true}")
+    private boolean secureCookie;
+
     /**
      * Publicly accessible endpoints — no token required.
      */
@@ -49,14 +57,44 @@ public class SecurityConfig {
             "/v3/api-docs/**"
     };
 
+    /**
+     * Endpoints that run BEFORE a session exists, so there is nothing for an
+     * attacker to ride on. Everything else (including /api/auth/logout and
+     * /api/auth/refresh-token) requires a valid X-XSRF-TOKEN header.
+     */
+    private static final String[] CSRF_EXEMPT_ENDPOINTS = {
+            "/api/auth/login",
+            "/api/auth/register/**",
+            "/api/auth/forgot-password",
+            "/api/auth/verify-otp",
+            "/api/auth/reset-password",
+            "/swagger-ui/**",
+            "/swagger-ui.html",
+            "/api-docs/**",
+            "/v3/api-docs/**"
+    };
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+
+        // ── Double-submit cookie CSRF repository ──────────────────────────────
+        // XSRF-TOKEN is readable by JS (HttpOnly=false) on purpose: the frontend
+        // copies it into the X-XSRF-TOKEN header. An attacker's site can't read it.
+        CookieCsrfTokenRepository csrfRepo = CookieCsrfTokenRepository.withHttpOnlyFalse();
+        csrfRepo.setCookiePath("/");
+        csrfRepo.setSecure(secureCookie);
+        csrfRepo.setCookieCustomizer(c -> c.sameSite("Strict"));
+
         http
-                // ── CORS ──────────────────────────────────────────────────────────
+                // ── CORS (only matters for local dev; prod goes through the Vercel proxy) ──
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
 
-                // ── Disable CSRF (stateless REST API — using HttpOnly cookies) ────
-                .csrf(AbstractHttpConfigurer::disable)
+                // ── CSRF: double-submit cookie, plain (non-BREACH) token for SPAs ─
+                .csrf(csrf -> csrf
+                        .csrfTokenRepository(csrfRepo)
+                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
+                        .ignoringRequestMatchers(CSRF_EXEMPT_ENDPOINTS)
+                )
 
                 // ── Stateless session — no HttpSession created or used ────────────
                 .sessionManagement(session ->
@@ -65,49 +103,30 @@ public class SecurityConfig {
 
                 // ── Route authorization rules ─────────────────────────────────────
                 .authorizeHttpRequests(auth -> auth
-
-                        // Permissive check for CORS preflight OPTIONS requests across all routes
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-
-                        // Public — anyone
                         .requestMatchers(PUBLIC_ENDPOINTS).permitAll()
-
-                        // Admin-only endpoints
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
-
-                        // Doctor-only endpoints
                         .requestMatchers("/api/doctor/**").hasRole("DOCTOR")
-
-                        // Patient-only endpoints
                         .requestMatchers("/api/patient/**").hasRole("PATIENT")
-
-                        // Notifications visible to both doctors and patients
                         .requestMatchers("/api/notifications/**").hasAnyRole("DOCTOR", "PATIENT")
-
-                        // Everything else must be authenticated
                         .anyRequest().authenticated()
                 )
 
                 // ── Custom JSON error responses (no HTML redirects) ───────────────
                 .exceptionHandling(ex -> ex
-                        .authenticationEntryPoint(authEntryPoint)  // 401 — missing / invalid token
-                        .accessDeniedHandler(accessDeniedHandler)  // 403 — valid token, wrong role
+                        .authenticationEntryPoint(authEntryPoint)  // 401
+                        .accessDeniedHandler(accessDeniedHandler)  // 403 (also used for CSRF failures)
                 )
 
-                // ── Wire DaoAuthenticationProvider ───────────────────────────────
                 .authenticationProvider(authenticationProvider())
 
-                // ── JwtAuthFilter runs BEFORE Spring's username/password filter ───
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                // ── Filter order ──────────────────────────────────────────────────
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(new CsrfCookieFilter(), CsrfFilter.class);
 
         return http.build();
     }
 
-    /**
-     * DaoAuthenticationProvider:
-     *  - loads user via UserDetailsService
-     *  - compares raw password with BCrypt hash using PasswordEncoder
-     */
     @Bean
     public AuthenticationProvider authenticationProvider() {
         DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
@@ -127,19 +146,28 @@ public class SecurityConfig {
     }
 
     /**
-     * CORS config — explicitly enumerates origin origins when credentials (HttpOnly cookies) are allowed.
+     * CORS — in production the browser only talks to the Vercel origin (proxy),
+     * so this is mainly for local dev and direct API testing.
+     * Origins must match exactly: no trailing slash.
      */
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Exact local frontend origin matches (wildcards combined with allowCredentials are strictly blocked)
-        config.setAllowedOrigins(List.of("http://localhost:5173", "http://127.0.0.1:5173","https://docspot-frontend-steel.vercel.app/"));
+        config.setAllowedOrigins(List.of(
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "https://docspot-frontend-steel.vercel.app"
+        ));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
-        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Requested-With", "Accept", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"));
+        config.setAllowedHeaders(List.of(
+                "Authorization", "Content-Type", "X-Requested-With", "Accept", "Origin",
+                "Access-Control-Request-Method", "Access-Control-Request-Headers",
+                "X-XSRF-TOKEN"
+        ));
         config.setExposedHeaders(List.of("Set-Cookie"));
         config.setAllowCredentials(true);
-        config.setMaxAge(3600L); // Cache preflight response for 1 hour
+        config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);

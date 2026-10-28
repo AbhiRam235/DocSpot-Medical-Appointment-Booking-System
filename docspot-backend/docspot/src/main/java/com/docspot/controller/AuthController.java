@@ -19,20 +19,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 /**
- * CHANGED from your original:
- *  - login: now takes HttpServletResponse and writes both tokens as
- *    HttpOnly cookies via CookieUtil, instead of just returning them in
- *    the JSON body (AuthResponse still carries them internally, but its
- *    @JsonIgnore fields keep them out of what actually gets serialized).
- *  - refreshToken: no longer takes a @RequestBody RefreshTokenRequest —
- *    reads the refresh token from its HttpOnly cookie via @CookieValue,
- *    and writes the new access token back as a cookie.
- *  - logout: same change — reads the refresh token cookie instead of a
- *    body, and clears both cookies via CookieUtil regardless of whether a
- *    valid refresh token was found (so logout always "works" from the
- *    client's point of view, even if the session had already expired).
- *  - registerPatient/registerDoctor/forgotPassword/verifyOtp/resetPassword
- *    are UNCHANGED — none of them involve the access/refresh cookies.
+ * Only change vs your current version: new GET /api/auth/csrf endpoint.
+ * Everything else is identical.
  */
 @RestController
 @RequestMapping("/api/auth")
@@ -43,6 +31,21 @@ public class AuthController {
 
     private final AuthService authService;
     private final CookieUtil  cookieUtil;
+
+    // ─── GET /api/auth/csrf ───────────────────────────────────────────────────
+
+    @GetMapping("/csrf")
+    @Operation(
+            summary     = "Bootstrap CSRF cookie",
+            description = """
+            Returns 204. The response sets the XSRF-TOKEN cookie (via CsrfCookieFilter).
+            The frontend calls this once on app load, then echoes the cookie value
+            in the X-XSRF-TOKEN header on every POST/PUT/PATCH/DELETE.
+            """
+    )
+    public ResponseEntity<Void> csrf() {
+        return ResponseEntity.noContent().build();
+    }
 
     // ─── POST /api/auth/register/patient ─────────────────────────────────────
 
@@ -113,7 +116,7 @@ public class AuthController {
             description = """
             No request body. Reads the refresh token from its HttpOnly cookie
             and issues a new access token cookie in response — the refresh
-            token itself is left unchanged.
+            token itself is left unchanged. Requires the X-XSRF-TOKEN header.
             Returns 400 if the refresh token cookie is missing, invalid,
             expired, or revoked.
             """
@@ -136,18 +139,12 @@ public class AuthController {
     // ─── POST /api/auth/logout ────────────────────────────────────────────────
 
     @PostMapping("/logout")
-    // CHANGED: dropped @PreAuthorize("isAuthenticated()") from your original.
-    // This endpoint's job only requires knowledge of the refreshToken
-    // cookie, not a currently-valid access token — and access tokens expire
-    // in 15 minutes, so requiring one made logout fail with a confusing 403
-    // any time someone left a tab open past that window and then clicked
-    // logout. authService.logout() already handles a null/invalid token
-    // gracefully, and the cookies get cleared either way.
     @Operation(
             summary     = "Logout",
             description = """
             No request body. Revokes the refresh token (read from its HttpOnly
             cookie, if present) in the database and clears both auth cookies.
+            Requires the X-XSRF-TOKEN header.
             """
     )
     public ResponseEntity<ApiResponse<String>> logout(
@@ -179,7 +176,6 @@ public class AuthController {
         String message = authService.forgotPassword(request, clientIp);
         return ResponseEntity.ok(ApiResponse.success(message));
     }
-
 
     // ─── POST /api/auth/verify-otp ───────────────────────────────────────────
 
