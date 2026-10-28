@@ -3,13 +3,43 @@ import axios from "axios";
 /**
  * Base Axios instance.
  * - withCredentials: true ensures HttpOnly cookies travel with every request.
- * - baseURL uses relative "/api" so requests route through Vite dev proxy
- *   (e.g., http://localhost:5173/api -> http://localhost:8080/api),
- *   preventing cross-origin cookie-blocking issues.
+ * - baseURL is the relative "/api":
+ *     dev  -> Vite proxy        (localhost:5173/api -> localhost:8080/api)
+ *     prod -> Vercel rewrite    (your-site.vercel.app/api -> Render /api)
+ *   so the browser only ever talks to ONE origin and cookies stay first-party.
+ *   Do NOT set VITE_API_BASE_URL in Vercel.
  */
 const axiosClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || "/api",
   withCredentials: true,
+});
+
+// ============================================================================
+// CSRF (double-submit cookie)
+// Backend sets a readable XSRF-TOKEN cookie; we echo it in X-XSRF-TOKEN on
+// every state-changing request. A third-party site can't read our cookie,
+// so it can't forge the header.
+// ============================================================================
+const MUTATING_METHODS = ["post", "put", "patch", "delete"];
+
+export function getCookie(name) {
+  const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+/** Call once on app start so the XSRF-TOKEN cookie exists before the first POST. */
+export function initCsrf() {
+  return axiosClient.get("/auth/csrf").catch(() => {});
+}
+
+axiosClient.interceptors.request.use((config) => {
+  if (MUTATING_METHODS.includes(config.method?.toLowerCase())) {
+    const token = getCookie("XSRF-TOKEN");
+    if (token) {
+      config.headers["X-XSRF-TOKEN"] = token;
+    }
+  }
+  return config;
 });
 
 // Flag to track whether a refresh-token API call is currently in progress
@@ -27,15 +57,13 @@ axiosClient.interceptors.response.use(
   // SUCCESS HANDLER (HTTP 2xx statuses)
   // --------------------------------------------------------------------------
   (response) => {
-    // Check if the response matches the backend envelope { success, message, data }
+    // Backend envelope: { success, message, data }
     if (
       response.data &&
       Object.prototype.hasOwnProperty.call(response.data, "data")
     ) {
-      // Return only the payload (`data`), skipping unnecessary envelope metadata
       return response.data.data;
     }
-    // Return standard response data if no nested `.data` property exists
     return response.data;
   },
 
@@ -43,87 +71,65 @@ axiosClient.interceptors.response.use(
   // ERROR HANDLER (HTTP 4xx/5xx statuses or network failures)
   // --------------------------------------------------------------------------
   async (error) => {
-    // Extract configuration of the failed request to enable retries
     const originalRequest = error.config;
-
-    // Extract HTTP status code (e.g., 401)
     const status = error.response?.status;
 
-    // Check if the failing request is an authentication endpoint (e.g., /auth/login)
+    // Auth endpoints (login, refresh, logout...) must never trigger a refresh
     const isAuthEndpoint = originalRequest?.url?.includes("/auth/");
 
     // ========================================================================
     // REFRESH TOKEN LOGIC
-    // Conditions:
-    // 1. Status must be 401 (Unauthorized - Access Token expired/invalid)
-    // 2. !originalRequest._retry: Prevents infinite retry loops if retried call fails again
-    // 3. !isAuthEndpoint: Excludes auth calls to prevent infinite loops on failed logins/refreshes
+    // 401 = access token expired/invalid. Not retried twice, not for /auth/*.
     // ========================================================================
     if (status === 401 && !originalRequest._retry && !isAuthEndpoint) {
-      
-      // ----------------------------------------------------------------------
-      // CASE 1: A refresh request is ALREADY in progress (Concurrent 401s)
-      // ----------------------------------------------------------------------
+
+      // CASE 1: A refresh is already in progress -> queue this request
       if (isRefreshing) {
-        // Return a pending Promise to pause this request until token refresh completes
         return new Promise((resolve, reject) => {
-          // Push resolve, reject, and original request configuration into queue
           refreshQueue.push({ resolve, reject, originalRequest });
         });
       }
 
-      // ----------------------------------------------------------------------
-      // CASE 2: This is the FIRST request to hit 401 (Triggers the refresh)
-      // ----------------------------------------------------------------------
-      // Mark original request so it won't trigger another refresh if retried call fails
+      // CASE 2: First 401 -> trigger the refresh
       originalRequest._retry = true;
-      
-      // Lock the system so subsequent failed requests go into `refreshQueue`
       isRefreshing = true;
 
       try {
-        // 1. Call the backend refresh-token endpoint (uses HttpOnly Refresh Cookie)
+        // Bare axios (no response unwrapping / no 401 handling), so we must
+        // attach the CSRF header ourselves: refresh-token is CSRF-protected.
         await axios.post(
           `${axiosClient.defaults.baseURL}/auth/refresh-token`,
           {},
-          { withCredentials: true }
+          {
+            withCredentials: true,
+            headers: { "X-XSRF-TOKEN": getCookie("XSRF-TOKEN") ?? "" },
+          }
         );
 
-        // 2. Refresh succeeded! Iterate through all queued requests and retry them
+        // Retry everything that was waiting
         refreshQueue.forEach(({ resolve, originalRequest: req }) => {
-          // Resolve the pending promise by re-executing request with new cookie attached
           resolve(axiosClient(req));
         });
-
-        // 3. Clear the queue array after processing all waiting requests
         refreshQueue = [];
 
-        // 4. Retry and return the original (first) request that triggered the refresh
+        // Retry the request that triggered the refresh
         return axiosClient(originalRequest);
 
       } catch (refreshError) {
-        // --------------------------------------------------------------------
-        // REFRESH FAILED: Refresh token is expired, missing, or invalid
-        // --------------------------------------------------------------------
-        // 1. Reject all waiting promises in queue so UI/component catch blocks trigger
+        // Refresh failed: reject everyone waiting, tell the app to log out
         refreshQueue.forEach(({ reject }) => reject(refreshError));
-        
-        // Clear the queue array
         refreshQueue = [];
 
-        // 2. Dispatch global event to notify app (e.g., clear user state, redirect to /login)
         window.dispatchEvent(new CustomEvent("docspot:session-expired"));
 
-        // 3. Reject the original request promise
         return Promise.reject(refreshError);
 
       } finally {
-        // Unlock the refresh flag regardless of success or failure
         isRefreshing = false;
       }
     }
 
-    // Pass through any other errors (e.g., 400, 403, 404, 500) directly to the calling code
+    // Everything else (400, 403, 404, 500, ...) goes straight to the caller
     return Promise.reject(error);
   }
 );
