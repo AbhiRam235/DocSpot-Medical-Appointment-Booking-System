@@ -134,7 +134,7 @@ public class SecurityConfig {
         CorsConfiguration config = new CorsConfiguration();
 
         // Exact local frontend origin matches (wildcards combined with allowCredentials are strictly blocked)
-        config.setAllowedOrigins(List.of("http://localhost:5173", "http://127.0.0.1:5173"));
+        config.setAllowedOrigins(List.of("http://localhost:5173", "http://127.0.0.1:5173","https://docspot-frontend-steel.vercel.app/"));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         config.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Requested-With", "Accept", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"));
         config.setExposedHeaders(List.of("Set-Cookie"));
