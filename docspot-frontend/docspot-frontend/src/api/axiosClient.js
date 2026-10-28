@@ -27,17 +27,30 @@ export function getCookie(name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-/** Call once on app start so the XSRF-TOKEN cookie exists before the first POST. */
-export function initCsrf() {
-  return axiosClient.get("/auth/csrf").catch(() => {});
+// Shared promise so parallel requests don't each call /csrf
+let csrfPromise = null;
+
+export async function ensureCsrfToken() {
+  const existing = getCookie("XSRF-TOKEN");
+  if (existing) return existing;
+
+  if (!csrfPromise) {
+    csrfPromise = axios
+      .get(`${axiosClient.defaults.baseURL}/auth/csrf`, { withCredentials: true })
+      .finally(() => { csrfPromise = null; });
+  }
+  await csrfPromise;
+  return getCookie("XSRF-TOKEN");
 }
 
-axiosClient.interceptors.request.use((config) => {
+export function initCsrf() {
+  return ensureCsrfToken().catch(() => {});
+}
+
+axiosClient.interceptors.request.use(async (config) => {
   if (MUTATING_METHODS.includes(config.method?.toLowerCase())) {
-    const token = getCookie("XSRF-TOKEN");
-    if (token) {
-      config.headers["X-XSRF-TOKEN"] = token;
-    }
+    const token = await ensureCsrfToken();
+    if (token) config.headers["X-XSRF-TOKEN"] = token;
   }
   return config;
 });
@@ -102,7 +115,7 @@ axiosClient.interceptors.response.use(
           {},
           {
             withCredentials: true,
-            headers: { "X-XSRF-TOKEN": getCookie("XSRF-TOKEN") ?? "" },
+            headers: { "X-XSRF-TOKEN": (await ensureCsrfToken()) ?? "" },
           }
         );
 
