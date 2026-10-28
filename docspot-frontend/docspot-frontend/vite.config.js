@@ -12,7 +12,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8080", // Proxies http://localhost:5173/api -> http://localhost:8080/api
+        target: "https://docspot-backend-vbr3.onrender.com/", // Proxies http://localhost:5173/api -> http://localhost:8080/api
         changeOrigin: true,
         secure: false,
       },
