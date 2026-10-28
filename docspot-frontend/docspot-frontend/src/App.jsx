@@ -4,6 +4,7 @@ import { Toaster } from "react-hot-toast";
 import { AuthProvider } from "./context/AuthContext";
 import AppRoutes from "./routes/AppRoutes";
 import ErrorBoundary from "./components/common/ErrorBoundary";
+import { initCsrf } from "./api/axiosClient";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -15,6 +16,7 @@ const queryClient = new QueryClient({
 });
 
 export default function App() {
+  initCsrf()
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
