@@ -1,7 +1,7 @@
 import { usePaginatedQuery } from "./usePaginatedQuery";
 import * as patientApi from "../api/patientApi";
 
-export function useDoctorSearch(filters, page, size = 3) {
+export function useDoctorSearch(filters, page, size = 10) {
   return usePaginatedQuery({
     queryKey: ["doctor-search", filters],
     queryFn: ({ page: p, size: s }) =>
