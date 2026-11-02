@@ -23,7 +23,8 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
-
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.security.core.Authentication;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -68,29 +69,27 @@ public class AuthService {
 
     // ─── 1. Register Patient ──────────────────────────────────────────────────
 
-    @Transactional
     public String registerPatient(PatientRegisterRequest req) {
         if (userRepository.existsByEmail(req.getEmail())) {
             throw new BadRequestException("An account with this email already exists.");
         }
 
-        User user = User.builder()
-                .name(req.getName())
-                .email(req.getEmail())
-                .mobile(req.getMobile())
-                .password(passwordEncoder.encode(req.getPassword()))
-                .role(Role.PATIENT)
-                .build();
-        userRepository.save(user);
+        String hash = passwordEncoder.encode(req.getPassword());   // slow part, no DB connection held
 
-        Patient patient = Patient.builder()
-                .user(user)
-                .dob(req.getDob())
-                .bloodGroup(req.getBloodGroup())
-                .build();
-        patientRepository.save(patient);
+        try {
+            transactionTemplate.executeWithoutResult(status -> {
+                User user = User.builder()
+                        .name(req.getName()).email(req.getEmail()).mobile(req.getMobile())
+                        .password(hash).role(Role.PATIENT).build();
+                userRepository.save(user);
+                patientRepository.save(Patient.builder()
+                        .user(user).dob(req.getDob()).bloodGroup(req.getBloodGroup()).build());
+            });
+        } catch (DataIntegrityViolationException e) {   // two requests racing on the same email
+            throw new BadRequestException("An account with this email already exists.");
+        }
 
-        log.info("Patient registered: {}", user.getEmail());
+        log.info("Patient registered: {}", req.getEmail());
         return "Registration successful. You can now log in.";
     }
 
@@ -135,11 +134,9 @@ public class AuthService {
 
     // ─── 3. Login ─────────────────────────────────────────────────────────────
 
-    @Transactional
     public AuthResponse login(LoginRequest req) {
-        authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(req.getEmail(), req.getPassword())
-        );
+        Authentication auth = authenticationManager.authenticate(     // BCrypt runs here, no connection held
+                new UsernamePasswordAuthenticationToken(req.getEmail(), req.getPassword()));
 
         User user = userRepository.findByEmailAndDeletedFalse(req.getEmail())
                 .orElseThrow(() -> new BadRequestException("Account not found or has been deactivated."));
@@ -147,30 +144,24 @@ public class AuthService {
         if (user.getRole() == Role.DOCTOR) {
             Doctor doctor = doctorRepository.findByUser_Email(user.getEmail())
                     .orElseThrow(() -> new BadRequestException("Doctor profile not found."));
-
             if (doctor.getStatus() == DoctorStatus.PENDING) {
-                throw new BadRequestException(
-                        "Your application is still under review. Please wait for admin approval.");
+                throw new BadRequestException("Your application is still under review. Please wait for admin approval.");
             }
             if (doctor.getStatus() == DoctorStatus.REJECTED) {
-                throw new BadRequestException(
-                        "Your application has been rejected. Please contact support.");
+                throw new BadRequestException("Your application has been rejected. Please contact support.");
             }
         }
 
-        UserDetails userDetails = userDetailsService.loadUserByUsername(user.getEmail());
+        UserDetails userDetails = (UserDetails) auth.getPrincipal();   // reuses the lookup authenticate() already did
         String accessToken  = jwtUtil.generateAccessToken(userDetails, user.getId(), user.getRole().name());
-        String refreshToken = createOrReplaceRefreshToken(user);
+        String refreshToken = transactionTemplate.execute(s -> createOrReplaceRefreshToken(user));
 
         log.info("Login successful: {} ({})", user.getEmail(), user.getRole());
 
         return AuthResponse.builder()
-                .accessToken(accessToken)
-                .refreshToken(refreshToken)
-                .role(user.getRole().name())
-                .userId(user.getId())
-                .name(user.getName())
-                .email(user.getEmail())
+                .accessToken(accessToken).refreshToken(refreshToken)
+                .role(user.getRole().name()).userId(user.getId())
+                .name(user.getName()).email(user.getEmail())
                 .build();
     }
 

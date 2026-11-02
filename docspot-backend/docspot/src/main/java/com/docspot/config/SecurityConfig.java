@@ -140,9 +140,12 @@ public class SecurityConfig {
         return config.getAuthenticationManager();
     }
 
+    @Value("${app.security.bcrypt-strength:10}")
+    private int bcryptStrength;
+
     @Bean
     public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder(12);
+        return new BCryptPasswordEncoder(bcryptStrength);
     }
 
     /**
