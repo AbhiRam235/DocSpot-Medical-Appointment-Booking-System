@@ -7,7 +7,7 @@ export default function NotificationList() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: ["notifications", "list"],
-    queryFn: () => notificationApi.getNotifications({ page: 0, size: 20 }),
+    queryFn: () => notificationApi.getNotifications({ page: 0, size: 2 }),
   });
 
   const invalidate = () => {
