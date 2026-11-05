@@ -2,7 +2,7 @@ name: docspot
 
 # Caddy + Spring Boot + Redis all on this VM. MySQL (Aiven) stays external.
 # Run with:  docker compose -f docker-compose.local-redis.yml up -d --build
-# Needs REDIS_LOCAL_PASSWORD in .env (see notes).
+# Needs REDIS_LOCAL_PASSWORD in .env on the VM.
 
 services:
   caddy:
@@ -78,14 +78,20 @@ services:
       MAIL_FROM: ${MAIL_FROM}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      SWAGGER_ENABLED: "true"
+      SWAGGER_ENABLED: "false"
 
-      # ---- OPTIONAL tuning: leave commented for the first test so that only
-      # ---- Redis changes. Uncomment one at a time afterwards and re-test.
-      # JAVA_OPTS: "-Xms1g -Xmx3g -XX:+UseG1GC -Xss512k -XX:MaxMetaspaceSize=256m -XX:+ExitOnOutOfMemoryError"
-      # SERVER_TOMCAT_THREADS_MAX: "40"
-      # SERVER_TOMCAT_ACCEPT_COUNT: "100"
-      # SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "15"
+      # ---- JVM sized for the 12 GB VM ----
+      JAVA_OPTS: "-Xms1g -Xmx3g -XX:+UseG1GC -Xss512k -XX:MaxMetaspaceSize=256m -XX:+ExitOnOutOfMemoryError"
+
+      # ---- Concurrency limits (the old values 10 threads / 5 connections were the cap) ----
+      SERVER_TOMCAT_THREADS_MAX: "50"
+      SERVER_TOMCAT_ACCEPT_COUNT: "100"
+      # Keep this BELOW your Aiven plan's max connections.
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "15"
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "5"
+
+      # ---- Diagnostics: uncomment briefly to count SQL queries per request ----
+      # SPRING_JPA_SHOW_SQL: "true"
     volumes:
       - uploads_data:/app/uploads
 

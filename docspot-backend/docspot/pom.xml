@@ -48,6 +48,10 @@
             <artifactId>mysql-connector-j</artifactId>
             <version>9.4.0</version>
         </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
 
         <!-- ===== RETRY (transient SMTP failure resilience on EmailService) ===== -->
         <dependency>
