@@ -1,0 +1,85 @@
+name: Backend CI/CD
+
+on:
+  # Every PR into main runs the tests (no path filter, so the required check
+  # always reports and a frontend-only PR is never stuck "waiting for status").
+  pull_request:
+    branches: [ main ]
+
+  # Only a push to main that touches backend code (or this file) triggers a deploy.
+  push:
+    branches: [ main ]
+    paths:
+      - 'docspot-backend/**'
+      - '.github/workflows/backend-ci-cd.yml'
+
+# Never run two pipelines for the same ref at once; a newer push cancels the older TEST run.
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─────────────────────────── 1. TEST ───────────────────────────
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docspot-backend/docspot     # where pom.xml lives
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: docspot-backend/docspot/pom.xml
+
+      - name: Run tests
+        run: mvn -B verify
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: docspot-backend/docspot/target/surefire-reports/
+          if-no-files-found: ignore
+
+  # ─────────────────────────── 2. DEPLOY ───────────────────────────
+  deploy:
+    name: deploy
+    needs: test                                            # runs ONLY if tests passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false                            # never kill a deploy halfway
+    steps:
+      - name: Pull latest code and rebuild containers on the Oracle VM
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          APP_DIR: ${{ secrets.OCI_APP_DIR }}
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USER }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          envs: APP_DIR
+          command_timeout: 20m                             # docker build of the jar takes a few minutes
+          script: |
+            set -euo pipefail
+            cd "$APP_DIR"
+            git pull --ff-only origin main
+            cd docspot-backend/docspot
+            docker compose -f docker-compose.local-redis.yml up -d --build
+            docker compose -f docker-compose.local-redis.yml ps
+            docker image prune -f
+
+      - name: Smoke test (GET /api/auth/csrf must return 204)
+        run: |
+          curl --fail --silent --show-error --output /dev/null \
+               --retry 12 --retry-delay 5 --retry-all-errors \
+               "${{ secrets.APP_URL }}/api/auth/csrf"
+          echo "Deployment is healthy."
