@@ -74,7 +74,7 @@ public class AuthService {
             throw new BadRequestException("An account with this email already exists.");
         }
 
-        String hash = passwordEncoder.encode(req.getPassword());   // slow part, no DB connection held
+        String hash = passwordEncoder.encode(req.getPassword()); // slow part, no DB connection held
 
         try {
             transactionTemplate.executeWithoutResult(status -> {
