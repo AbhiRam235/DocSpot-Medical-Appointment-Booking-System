@@ -74,7 +74,7 @@ public class AuthService {
             throw new BadRequestException("An account with this email already exists.");
         }
 
-        String hash = passwordEncoder.encode(req.getPassword());   // slow part, no DB connection held
+        String hash = passwordEncoder.encode(req.getPassword()); // slow part, no DB connection held
 
         try {
             transactionTemplate.executeWithoutResult(status -> {
@@ -88,7 +88,7 @@ public class AuthService {
         } catch (DataIntegrityViolationException e) {   // two requests racing on the same email
             throw new BadRequestException("An account with this email already exists.");
         }
-
+        log.info("Patient registered: {}", req.getEmail());
         log.info("Patient registered: {}", req.getEmail());
         return "Registration successful. You can now log in.";
     }
